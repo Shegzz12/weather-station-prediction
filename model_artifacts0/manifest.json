@@ -1,0 +1,87 @@
+{
+  "feature_columns": [
+    "hour_sin",
+    "hour_cos",
+    "doy_sin",
+    "doy_cos",
+    "month",
+    "temperature",
+    "humidity",
+    "temp_bmp180",
+    "pressure_loc1",
+    "temp_bmp280",
+    "pressure_loc2",
+    "rain_raw",
+    "soil_moisture",
+    "pressure_loc1_trend_3h",
+    "pressure_loc1_trend_6h",
+    "pressure_loc2_trend_3h",
+    "pressure_loc2_trend_6h",
+    "pressure_diff",
+    "humidity_trend_3h",
+    "rain_rate",
+    "rain_accum_6h",
+    "rain_accum_24h"
+  ],
+  "regression_targets": [
+    "temperature_target",
+    "humidity_target",
+    "pressure_loc1_target_delta",
+    "pressure_loc2_target_delta"
+  ],
+  "pressure_pairs": [
+    [
+      "pressure_loc1",
+      "pressure_loc1_target",
+      "pressure_loc1_target_delta"
+    ],
+    [
+      "pressure_loc2",
+      "pressure_loc2_target",
+      "pressure_loc2_target_delta"
+    ]
+  ],
+  "classification_targets": [
+    "rain_category_target",
+    "flood_risk_target"
+  ],
+  "block_steps": 672,
+  "embargo_steps": 192,
+  "gbm_backend": "lightgbm",
+  "regression_metrics": {
+    "temperature_target": {
+      "MAE": 0.5490542653056194,
+      "MedAE": 0.4454728593524333,
+      "RMSE": 0.6913898527459786,
+      "R2": 0.9695803088906534
+    },
+    "humidity_target": {
+      "MAE": 2.541453894325177,
+      "MedAE": 2.1214193131200787,
+      "RMSE": 3.182315487733673,
+      "R2": 0.946170310668793
+    },
+    "pressure_loc1_target_delta": {
+      "MAE": 289.0570143739378,
+      "MedAE": 250.94499768117203,
+      "RMSE": 359.9707534070071,
+      "R2": 0.004807781319193238
+    },
+    "pressure_loc2_target_delta": {
+      "MAE": 287.7155743009995,
+      "MedAE": 249.05526749566468,
+      "RMSE": 356.531645589843,
+      "R2": 0.01978183534426159
+    }
+  },
+  "classification_metrics": {
+    "rain_category_target": {
+      "accuracy": 0.6216856060606061,
+      "f1_macro": 0.40920269049222546
+    },
+    "flood_risk_target": {
+      "accuracy": 0.8143939393939394,
+      "f1_macro": 0.7922415468494984
+    }
+  }
+}
