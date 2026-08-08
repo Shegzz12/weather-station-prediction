@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 
 # ------------------------------------------------------------------------------
@@ -89,6 +89,29 @@ def init_csv_storage():
             print(f"📁 Created initial storage log: {CSV_FILE_PATH}")
 
 init_csv_storage()
+
+
+def sanitize_records(df: pd.DataFrame) -> list:
+    """
+    Converts a DataFrame to a list of JSON-safe dicts.
+    pandas leaves NaN for any missing/misaligned cell, and Python's json module
+    will happily emit the literal token `NaN`, which is NOT valid JSON — browsers'
+    res.json() throws a SyntaxError on it, which was silently breaking the
+    frontend's history chart and raw log table. Replacing NaN with None here
+    makes it serialize as JSON `null`, which every client can parse safely.
+    """
+    return json.loads(df.where(pd.notnull(df), None).to_json(orient="records"))
+
+
+def sanitize_record(d: dict) -> dict:
+    """Same NaN->None sanitization, but for a single dict (e.g. df.iloc[-1].to_dict())."""
+    clean = {}
+    for k, v in d.items():
+        if isinstance(v, float) and math.isnan(v):
+            clean[k] = None
+        else:
+            clean[k] = v
+    return clean
 
 
 # ------------------------------------------------------------------------------
@@ -307,16 +330,20 @@ def receive_telemetry():
 @app.route("/api/latest", methods=["GET"])
 def get_latest():
     """Retrieves the single most recent sensor reading and prediction record."""
-    with csv_lock:
-        if not os.path.exists(CSV_FILE_PATH):
-            return jsonify({"error": "No historical log available yet"}), 444
+    try:
+        with csv_lock:
+            if not os.path.exists(CSV_FILE_PATH):
+                return jsonify({"error": "No historical log available yet"}), 444
 
-        df = pd.read_csv(CSV_FILE_PATH)
-        if df.empty:
-            return jsonify({"message": "Database log is empty"}), 200
+            df = pd.read_csv(CSV_FILE_PATH)
+            if df.empty:
+                return jsonify({"message": "Database log is empty"}), 200
 
-        latest_record = df.iloc[-1].to_dict()
-        return jsonify(latest_record), 200
+            latest_record = sanitize_record(df.iloc[-1].to_dict())
+            return jsonify(latest_record), 200
+    except Exception as e:
+        print(f"❌ Exception in /api/latest: {str(e)}")
+        return jsonify({"error": "Failed to read latest record", "details": str(e)}), 500
 
 
 @app.route("/api/history", methods=["GET"])
@@ -332,25 +359,93 @@ def get_history():
 
     limit = min(max(1, limit), 2000)  # Bound limit between 1 and 2000
 
+    try:
+        with csv_lock:
+            if not os.path.exists(CSV_FILE_PATH):
+                return jsonify({"count": 0, "order": order, "data": []}), 200
+
+            df = pd.read_csv(CSV_FILE_PATH)
+            if df.empty:
+                return jsonify({"count": 0, "order": order, "data": []}), 200
+
+            if order == "desc":
+                df_sliced = df.tail(limit).iloc[::-1]
+            else:
+                df_sliced = df.tail(limit)
+
+            records = sanitize_records(df_sliced)
+            return jsonify({
+                "count": len(records),
+                "order": order,
+                "data": records
+            }), 200
+    except Exception as e:
+        print(f"❌ Exception in /api/history: {str(e)}")
+        return jsonify({"error": "Failed to read history", "details": str(e)}), 500
+
+
+@app.route("/api/export", methods=["GET"])
+def export_csv():
+    """
+    Downloads the full raw telemetry_history.csv file as-is, for offline
+    analysis, backup, or re-training. Streams the file directly rather than
+    going through pandas/JSON, so it works even if a row somewhere has a
+    malformed value that would otherwise break the JSON-based endpoints.
+    """
     with csv_lock:
         if not os.path.exists(CSV_FILE_PATH):
-            return jsonify([]), 200
+            return jsonify({"error": "No historical log available yet"}), 404
 
-        df = pd.read_csv(CSV_FILE_PATH)
-        if df.empty:
-            return jsonify([]), 200
+        timestamp_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+        download_name = f"telemetry_history_{timestamp_suffix}.csv"
 
-        if order == "desc":
-            df_sliced = df.tail(limit).iloc[::-1]
-        else:
-            df_sliced = df.tail(limit)
+        return send_file(
+            CSV_FILE_PATH,
+            mimetype="text/csv",
+            as_attachment=True,
+            download_name=download_name,
+        )
 
-        records = df_sliced.to_dict(orient="records")
-        return jsonify({
-            "count": len(records),
-            "order": order,
-            "data": records
-        }), 200
+
+@app.route("/api/reset", methods=["POST"])
+def reset_csv():
+    """
+    Wipes the live telemetry log so new readings start accumulating from
+    scratch (e.g. after test data or a schema change has polluted the
+    rolling 6h/24h trend features). Does NOT delete data outright — the
+    existing CSV is renamed into a timestamped backup first, so nothing
+    is unrecoverably lost even on an accidental click.
+
+    Requires a JSON body {"confirm": true} to guard against this being
+    triggered by anything other than a deliberate frontend action (a bare
+    GET-able endpoint would be too easy to hit by accident via a stray link
+    or crawler).
+    """
+    payload = request.get_json(silent=True) or {}
+    if payload.get("confirm") is not True:
+        return jsonify({"error": "Reset requires JSON body {\"confirm\": true}"}), 400
+
+    with csv_lock:
+        backup_name = None
+        if os.path.exists(CSV_FILE_PATH) and os.path.getsize(CSV_FILE_PATH) > 0:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_name = f"telemetry_history_backup_{stamp}.csv"
+            backup_path = os.path.join(DATA_DIR, backup_name)
+            os.rename(CSV_FILE_PATH, backup_path)
+            print(f"🗄️  Backed up existing log to: {backup_path}")
+
+        df_empty = pd.DataFrame(columns=LOG_COLUMNS)
+        df_empty.to_csv(CSV_FILE_PATH, index=False)
+        print(f"🧹 Reset {CSV_FILE_PATH} — logging starts fresh from here.")
+
+    return jsonify({
+        "status": "reset",
+        "backup_created": backup_name,
+        "message": (
+            f"Live log cleared. Prior data preserved as '{backup_name}' in {DATA_DIR}/."
+            if backup_name else "Live log was already empty; nothing to back up."
+        )
+    }), 200
 
 
 # ------------------------------------------------------------------------------
