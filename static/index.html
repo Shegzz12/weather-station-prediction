@@ -51,7 +51,6 @@
 
   a{color:inherit;}
 
-  /* ---------------- Layout shell ---------------- */
   .wrap{
     max-width:1180px;
     margin:0 auto;
@@ -131,7 +130,6 @@
     100%{box-shadow:0 0 0 0 rgba(107,158,120,0);}
   }
 
-  /* ---------------- Panels ---------------- */
   .panel{
     background:linear-gradient(180deg, var(--bg-panel), var(--bg-panel-2));
     border:1px solid var(--hairline);
@@ -160,7 +158,6 @@
     text-transform:uppercase;
   }
 
-  /* ---------------- Hero: gauge + stations ---------------- */
   .hero-grid{
     display:grid;
     grid-template-columns: 1fr 1.15fr 1fr;
@@ -212,7 +209,6 @@
   .trend.down{color:var(--safe); background:var(--safe-dim);}
   .trend.flat{color:var(--mist); background:rgba(110,148,144,0.12);}
 
-  /* Gauge centerpiece */
   .gauge-card{
     display:flex;
     flex-direction:column;
@@ -260,7 +256,6 @@
     text-transform:uppercase;
   }
 
-  /* ---------------- Outlook row (rain + heat) ---------------- */
   .outlook-row{
     display:grid;
     grid-template-columns:1fr 1fr;
@@ -268,7 +263,6 @@
   }
   @media (max-width:880px){ .outlook-row{ grid-template-columns:1fr; } }
 
-  /* ---------------- Rain / heat outlook ---------------- */
   .rain-outlook-grid{
     display:flex;
     align-items:center;
@@ -302,7 +296,6 @@
   }
   .rain-stat-val small{ font-size:11px; color:var(--mist); font-weight:400; margin-left:2px; }
 
-  /* ---------------- Forecast row ---------------- */
   .forecast-grid{
     display:grid;
     grid-template-columns:repeat(4,1fr);
@@ -327,7 +320,6 @@
   .fc-value small{font-family:var(--mono); font-size:14px; color:var(--ink-dim); font-weight:400;}
   .fc-note{ font-size:11.5px; color:var(--ink-dim); margin-top:4px;}
 
-  /* ---------------- History ---------------- */
   .history-panel{ margin-bottom:16px; }
   .range-controls{
     display:flex;
@@ -369,8 +361,49 @@
   .chart-tab.active{ color:var(--ink); border-color:var(--hairline); background:rgba(234,242,240,0.04); }
   .chart-box{ height:280px; position:relative; }
 
-  /* ---------------- Log table ---------------- */
   .log-panel{ }
+  .log-head-actions{
+    display:flex;
+    align-items:center;
+    gap:10px;
+  }
+  .download-btn{
+    display:inline-flex;
+    align-items:center;
+    gap:7px;
+    font-family:var(--mono);
+    font-size:11px;
+    letter-spacing:0.03em;
+    padding:7px 12px;
+    border-radius:8px;
+    background:var(--brass-dim);
+    border:1px solid var(--brass);
+    color:var(--brass);
+    cursor:pointer;
+    transition:all .15s ease;
+    text-decoration:none;
+  }
+  .download-btn:hover{ background:rgba(201,162,75,0.5); color:var(--ink); }
+  .download-btn svg{ width:13px; height:13px; }
+  .download-btn:disabled{ opacity:0.5; cursor:not-allowed; }
+  .reset-btn{
+    display:inline-flex;
+    align-items:center;
+    gap:7px;
+    font-family:var(--mono);
+    font-size:11px;
+    letter-spacing:0.03em;
+    padding:7px 12px;
+    border-radius:8px;
+    background:var(--alert-dim);
+    border:1px solid var(--alert);
+    color:var(--alert);
+    cursor:pointer;
+    transition:all .15s ease;
+  }
+  .reset-btn:hover{ background:rgba(193,72,58,0.5); color:var(--ink); }
+  .reset-btn svg{ width:13px; height:13px; }
+  .reset-btn:disabled{ opacity:0.5; cursor:not-allowed; }
   .table-scroll{
     overflow-x:auto;
     border-radius:10px;
@@ -454,7 +487,6 @@
     </div>
   </header>
 
-  <!-- HERO: two station cards + centerpiece flood-risk gauge -->
   <section class="hero-grid">
     <div class="panel station-card">
       <div class="station-label">Station 1 · BMP180</div>
@@ -497,7 +529,6 @@
     </div>
   </section>
 
-  <!-- OUTLOOK ROW — rainfall tendency + heat/overheat tendency, equal billing to flood risk -->
   <section class="outlook-row" style="margin-bottom:16px;">
 
     <div class="panel rain-panel">
@@ -547,11 +578,9 @@
       <div class="rain-outlook-grid">
         <div class="rain-cylinder-wrap">
           <svg viewBox="0 0 70 150" width="70" height="150">
-            <!-- thermometer stem -->
             <rect x="22" y="4" width="26" height="106" rx="13" fill="rgba(234,242,240,0.06)" stroke="var(--hairline)" stroke-width="1.5"/>
             <clipPath id="stemClip"><rect x="22" y="4" width="26" height="106" rx="13"/></clipPath>
             <rect id="heatStemFill" x="22" y="110" width="26" height="0" fill="#6B9E78" clip-path="url(#stemClip)" style="transition: y 1.1s cubic-bezier(.34,1.56,.64,1), height 1.1s cubic-bezier(.34,1.56,.64,1), fill 0.4s ease;"/>
-            <!-- thermometer bulb -->
             <circle cx="35" cy="128" r="20" fill="rgba(234,242,240,0.06)" stroke="var(--hairline)" stroke-width="1.5"/>
             <circle id="heatBulbFill" cx="35" cy="128" r="15" fill="#6B9E78" style="transition: fill 0.4s ease;"/>
             <g stroke="rgba(234,242,240,0.15)" stroke-width="1">
@@ -584,7 +613,6 @@
 
   </section>
 
-  <!-- secondary readings strip -->
   <section class="hero-grid" style="grid-template-columns:repeat(4,1fr); margin-bottom:16px;">
     <div class="panel fc-card">
       <div class="fc-label">Humidity</div>
@@ -608,7 +636,6 @@
     </div>
   </section>
 
-  <!-- FORECAST -->
   <section class="panel" style="margin-bottom:16px;">
     <div class="panel-head">
       <h2>48h Model Forecast</h2>
@@ -634,7 +661,6 @@
     </div>
   </section>
 
-  <!-- HISTORY CHART -->
   <section class="panel history-panel">
     <div class="panel-head">
       <h2>Historic Trend</h2>
@@ -655,11 +681,20 @@
     <div class="chart-box"><canvas id="historyChart"></canvas></div>
   </section>
 
-  <!-- LOG TABLE -->
   <section class="panel log-panel">
     <div class="panel-head">
       <h2>Raw Log</h2>
-      <span class="tag" id="rowCount">0 records</span>
+      <div class="log-head-actions">
+        <span class="tag" id="rowCount">0 records</span>
+        <button class="download-btn" id="downloadCsvBtn" title="Download full telemetry log as CSV">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          <span>Download CSV</span>
+        </button>
+        <button class="reset-btn" id="resetCsvBtn" title="Back up and clear the live telemetry log">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+          <span>Reset Log</span>
+        </button>
+      </div>
     </div>
     <div class="table-scroll">
       <table>
@@ -693,7 +728,6 @@ let currentSeries = 'temp';
 let chart;
 let latestFloodCategory = '';
 
-// ---------- helpers ----------
 function fmt(n, d=1){
   if(n === null || n === undefined || Number.isNaN(n)) return '—';
   return Number(n).toFixed(d);
@@ -717,8 +751,6 @@ function riskLevel(cat){
   return {frac:0.5, cls:'amber', label:cat};
 }
 function heatStyle(tempC){
-  // Full extreme-cold → extreme-heat scale, per user's calibration:
-  // below 25°C = extreme cold, above 45°C = extreme heat.
   if(tempC === null || tempC === undefined || Number.isNaN(tempC)){
     return {label:'no data', cls:'safe', frac:0.05, fillColor:'#6E9490'};
   }
@@ -742,12 +774,10 @@ function rainStyle(cat){
 }
 
 function setNeedle(frac){
-  // needle sweeps from -90deg (left, safe) to +90deg (right, severe) around pivot 130,130
   const deg = -90 + (frac * 180);
   document.getElementById('needle').setAttribute('transform', `rotate(${deg} 130 130)`);
 }
 
-// ---------- clock ----------
 function tickClock(){
   const d = new Date();
   document.getElementById('clock').innerHTML = `<b>${d.toLocaleTimeString()}</b> &nbsp;${d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})}`;
@@ -755,7 +785,6 @@ function tickClock(){
 setInterval(tickClock, 1000);
 tickClock();
 
-// ---------- health ----------
 async function pollHealth(){
   const dot = document.getElementById('statusDot');
   const txt = document.getElementById('statusText');
@@ -769,14 +798,17 @@ async function pollHealth(){
   }catch(e){
     dot.className = 'dot off';
     txt.textContent = 'offline';
+    console.error('[pollHealth] failed:', e);
   }
 }
 
-// ---------- latest ----------
 async function pollLatest(){
   try{
     const res = await fetch('/api/latest');
-    if(!res.ok) return;
+    if(!res.ok){
+      console.error('[pollLatest] HTTP', res.status, await res.text().catch(()=>''));
+      return;
+    }
     const r = await res.json();
     if(!r || r.message) return;
 
@@ -809,7 +841,6 @@ async function pollLatest(){
     readoutEl.className = 'gauge-readout ' + risk.cls;
     document.getElementById('floodSub').textContent = `as of ${r.timestamp || '—'}`;
 
-    // Rain outlook panel
     const rainCat = r.rain_category_target;
     const rs = rainStyle(rainCat);
     const rainLabelEl = document.getElementById('rainCategoryLabel');
@@ -827,7 +858,6 @@ async function pollLatest(){
     fill.setAttribute('y', 146 - h);
     fill.setAttribute('fill', rs.fillColor);
 
-    // Heat / overheat outlook panel — driven by the numeric temperature_target
     const currentTemp = r.temperature !== undefined ? Number(r.temperature) : null;
     const targetTemp = r.temperature_target !== undefined ? Number(r.temperature_target) : null;
     const hs = heatStyle(targetTemp);
@@ -854,10 +884,9 @@ async function pollLatest(){
     heatStem.setAttribute('fill', hs.fillColor);
     document.getElementById('heatBulbFill').setAttribute('fill', hs.fillColor);
 
-  }catch(e){ /* keep last known values on transient error */ }
+  }catch(e){ console.error('[pollLatest] failed:', e); }
 }
 
-// ---------- history: chart + table ----------
 function seriesConfig(rows, key){
   const configs = {
     temp: [
@@ -950,15 +979,82 @@ function renderTable(rows){
 async function pollHistory(){
   try{
     const res = await fetch(`/api/history?limit=${currentLimit}&order=asc`);
-    if(!res.ok) return;
+    if(!res.ok){
+      console.error('[pollHistory] HTTP', res.status, await res.text().catch(()=>''));
+      return;
+    }
     const payload = await res.json();
     const rows = Array.isArray(payload) ? payload : (payload.data || []);
     renderChart(rows);
     renderTable(rows);
-  }catch(e){ /* ignore transient errors */ }
+  }catch(e){ console.error('[pollHistory] failed:', e); }
 }
 
-// ---------- controls ----------
+async function downloadCsv(){
+  const btn = document.getElementById('downloadCsvBtn');
+  const label = btn.querySelector('span');
+  const originalLabel = label.textContent;
+  btn.disabled = true;
+  label.textContent = 'Preparing…';
+  try{
+    const res = await fetch('/api/export');
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = new Date().toISOString().replace(/[:.]/g,'-');
+    a.href = url;
+    a.download = `telemetry_history_${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  }catch(e){
+    console.error('[downloadCsv] failed:', e);
+    alert('Could not download telemetry log. Check the console for details.');
+  }finally{
+    btn.disabled = false;
+    label.textContent = originalLabel;
+  }
+}
+document.getElementById('downloadCsvBtn').addEventListener('click', downloadCsv);
+
+async function resetLog(){
+  const confirmed = confirm(
+    "Reset the live telemetry log?\n\n" +
+    "The current log will be backed up server-side (not deleted) and a fresh, empty log will start collecting new readings immediately.\n\n" +
+    "Continue?"
+  );
+  if(!confirmed) return;
+
+  const btn = document.getElementById('resetCsvBtn');
+  const label = btn.querySelector('span');
+  const originalLabel = label.textContent;
+  btn.disabled = true;
+  label.textContent = 'Resetting…';
+  try{
+    const res = await fetch('/api/reset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({confirm: true})
+    });
+    const data = await res.json().catch(()=>({}));
+    if(!res.ok){
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    alert(data.message || 'Log reset.');
+    // Refresh immediately so the UI reflects the now-empty log
+    pollAll();
+  }catch(e){
+    console.error('[resetLog] failed:', e);
+    alert('Could not reset the log: ' + e.message);
+  }finally{
+    btn.disabled = false;
+    label.textContent = originalLabel;
+  }
+}
+document.getElementById('resetCsvBtn').addEventListener('click', resetLog);
+
 document.querySelectorAll('.range-btn').forEach(btn=>{
   btn.addEventListener('click', ()=>{
     document.querySelectorAll('.range-btn').forEach(b=>b.classList.remove('active'));
@@ -976,7 +1072,6 @@ document.querySelectorAll('.chart-tab').forEach(btn=>{
   });
 });
 
-// ---------- boot ----------
 function pollAll(){
   pollHealth();
   pollLatest();
