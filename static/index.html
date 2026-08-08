@@ -497,7 +497,7 @@
     </div>
 
     <div class="panel gauge-card">
-      <div class="gauge-title">48h Flood Risk Outlook</div>
+      <div class="gauge-title">48h Flood Risk Outlook <span class="tag">flood_risk_percent</span></div>
       <div class="gauge-wrap">
         <svg viewBox="0 0 260 150" width="100%">
           <defs>
@@ -534,7 +534,7 @@
     <div class="panel rain-panel">
       <div class="panel-head">
         <h2>48h Rainfall Tendency</h2>
-        <span class="tag">rain_category_target</span>
+        <span class="tag">rain_percent</span>
       </div>
       <div class="rain-outlook-grid">
         <div class="rain-cylinder-wrap">
@@ -573,7 +573,7 @@
     <div class="panel heat-panel">
       <div class="panel-head">
         <h2>48h Extreme Cold/Overheat Tendency</h2>
-        <span class="tag">temperature_target</span>
+        <span class="tag">temperature_percent</span>
       </div>
       <div class="rain-outlook-grid">
         <div class="rain-cylinder-wrap">
@@ -677,6 +677,7 @@
       <button class="chart-tab" data-series="pres">Pressure (both stations)</button>
       <button class="chart-tab" data-series="rain">Rain accumulation</button>
       <button class="chart-tab" data-series="soil">Soil moisture</button>
+      <button class="chart-tab" data-series="outlook">48h outlook %</button>
     </div>
     <div class="chart-box"><canvas id="historyChart"></canvas></div>
   </section>
@@ -740,15 +741,20 @@ function trendBadge(val){
   const arrow = v > 0 ? '▲' : '▼';
   return `<span class="trend ${cls}">${arrow} ${Math.abs(v).toFixed(2)}</span>`;
 }
-function riskLevel(cat){
-  if(!cat) return {frac:0.1, cls:'safe', label:'no data'};
-  const c = String(cat).toLowerCase();
-  if(/(severe|extreme|critical)/.test(c)) return {frac:0.97, cls:'alert', label:cat};
-  if(/(high)/.test(c)) return {frac:0.8, cls:'alert', label:cat};
-  if(/(moderate|medium|elevated)/.test(c)) return {frac:0.5, cls:'amber', label:cat};
-  if(/(low)/.test(c)) return {frac:0.22, cls:'safe', label:cat};
-  if(/(none|safe|clear|nil)/.test(c)) return {frac:0.06, cls:'safe', label:cat};
-  return {frac:0.5, cls:'amber', label:cat};
+// The API returns a 0-100 percentage now, so the gauge reads it directly instead
+// of snapping to one of three positions inferred from the category string. The
+// category is still shown, and is still what older records fall back to.
+function pctClass(pct){
+  if(pct >= 60) return 'alert';
+  if(pct >= 25) return 'amber';
+  return 'safe';
+}
+function riskLevel(pct, cat){
+  if(pct === null || pct === undefined || Number.isNaN(Number(pct))){
+    return {frac:0.1, cls:'safe', label:'no data', pct:null};
+  }
+  const p = Math.max(0, Math.min(100, Number(pct)));
+  return {frac:p/100, cls:pctClass(p), label:cat || '—', pct:p};
 }
 function heatStyle(tempC){
   if(tempC === null || tempC === undefined || Number.isNaN(tempC)){
@@ -763,6 +769,13 @@ function heatStyle(tempC){
   return          {label:'extreme heat',  cls:'alert', frac:0.98, fillColor:'#C1483A'};
 }
 
+function rainFromPercent(pct, cat){
+  const style = rainStyle(cat);
+  if(pct === null || pct === undefined || Number.isNaN(Number(pct))) return style;
+  const p = Math.max(0, Math.min(100, Number(pct)));
+  return {...style, frac:p/100, pct:p};
+}
+
 function rainStyle(cat){
   if(!cat) return {bg:'rgba(110,148,144,0.15)', color:'var(--ink-dim)', cls:'safe', frac:0.05, fillColor:'#6E9490'};
   const c = String(cat).toLowerCase();
@@ -771,6 +784,16 @@ function rainStyle(cat){
   if(/light|drizzle/.test(c)) return {bg:'var(--safe-dim)', color:'var(--safe)', cls:'safe', frac:0.28, fillColor:'#6B9E78'};
   if(/none|dry|clear/.test(c)) return {bg:'rgba(110,148,144,0.15)', color:'var(--ink-dim)', cls:'safe', frac:0.05, fillColor:'#6E9490'};
   return {bg:'var(--amber-dim)', color:'var(--amber)', cls:'amber', frac:0.5, fillColor:'#C98A3A'};
+}
+
+// Shows how the blended percentage was made up, so a high reading during the wet
+// season is visibly "season says X, sensors say Y" rather than an opaque number.
+function splitLine(climatePct, sensorPct, timestamp){
+  const parts = [];
+  if(climatePct !== undefined && climatePct !== null) parts.push(`season ${Number(climatePct).toFixed(0)}%`);
+  if(sensorPct !== undefined && sensorPct !== null) parts.push(`sensors ${Number(sensorPct).toFixed(0)}%`);
+  const split = parts.length === 2 ? `50/50 blend · ${parts.join(' · ')}` : '';
+  return split ? `${split} · as of ${timestamp || '—'}` : `as of ${timestamp || '—'}`;
 }
 
 function setNeedle(frac){
@@ -834,19 +857,25 @@ async function pollLatest(){
     document.getElementById('fcPres1').innerHTML = `${fmt(r.pressure_loc1_target)}<small>hPa</small>`;
     document.getElementById('fcPres2').innerHTML = `${fmt(r.pressure_loc2_target)}<small>hPa</small>`;
 
-    const risk = riskLevel(r.flood_risk_target);
+    const risk = riskLevel(r.flood_risk_percent, r.flood_risk_target);
     setNeedle(risk.frac);
     const readoutEl = document.getElementById('floodReadout');
-    readoutEl.textContent = risk.label.toUpperCase ? risk.label.toUpperCase() : risk.label;
+    readoutEl.textContent = risk.pct === null
+      ? 'NO DATA'
+      : `${risk.pct.toFixed(0)}% · ${String(risk.label).toUpperCase()}`;
     readoutEl.className = 'gauge-readout ' + risk.cls;
-    document.getElementById('floodSub').textContent = `as of ${r.timestamp || '—'}`;
+    document.getElementById('floodSub').textContent = splitLine(
+      r.flood_climate_percent, r.flood_sensor_percent, r.timestamp);
 
     const rainCat = r.rain_category_target;
-    const rs = rainStyle(rainCat);
+    const rs = rainFromPercent(r.rain_percent, rainCat);
     const rainLabelEl = document.getElementById('rainCategoryLabel');
-    rainLabelEl.textContent = rainCat ? String(rainCat).toUpperCase() : 'NO DATA';
-    rainLabelEl.className = 'rain-category-label ' + (rs.cls || 'safe');
-    document.getElementById('rainCategorySub').textContent = `as of ${r.timestamp || '—'}`;
+    rainLabelEl.textContent = rs.pct === undefined || rs.pct === null
+      ? (rainCat ? String(rainCat).toUpperCase() : 'NO DATA')
+      : `${rs.pct.toFixed(0)}% · ${String(rainCat || '—').toUpperCase()}`;
+    rainLabelEl.className = 'rain-category-label ' + (rs.pct === undefined ? (rs.cls || 'safe') : pctClass(rs.pct));
+    document.getElementById('rainCategorySub').textContent = splitLine(
+      r.rain_climate_percent, r.rain_sensor_percent, r.timestamp);
     document.getElementById('rainOutlookRate').innerHTML = `${fmt(r.rain_rate,2)}<small>mm/hr</small>`;
     document.getElementById('rainOutlook6h').innerHTML = `${fmt(r.rain_accum_6h,1)}<small>mm</small>`;
     document.getElementById('rainOutlook24h').innerHTML = `${fmt(r.rain_accum_24h,1)}<small>mm</small>`;
@@ -861,9 +890,12 @@ async function pollLatest(){
     const currentTemp = r.temperature !== undefined ? Number(r.temperature) : null;
     const targetTemp = r.temperature_target !== undefined ? Number(r.temperature_target) : null;
     const hs = heatStyle(targetTemp);
+    const tempPct = r.temperature_percent;
 
     const heatLabelEl = document.getElementById('heatCategoryLabel');
-    heatLabelEl.textContent = hs.label.toUpperCase();
+    heatLabelEl.textContent = (tempPct === undefined || tempPct === null)
+      ? hs.label.toUpperCase()
+      : `${Number(tempPct).toFixed(0)}% · ${hs.label.toUpperCase()}`;
     heatLabelEl.className = 'rain-category-label ' + hs.cls;
     document.getElementById('heatCategorySub').textContent = `as of ${r.timestamp || '—'}`;
     document.getElementById('heatOutlookNow').innerHTML = `${fmt(currentTemp)}<small>°C</small>`;
@@ -904,6 +936,12 @@ function seriesConfig(rows, key){
     rain: [
       {label:'Accum 6h (mm)', field:'rain_accum_6h', color:'#6E9490'},
       {label:'Accum 24h (mm)', field:'rain_accum_24h', color:'#C1483A'},
+    ],
+    outlook: [
+      {label:'Flood risk (%)', field:'flood_risk_percent', color:'#C1483A'},
+      {label:'Rainfall tendency (%)', field:'rain_percent', color:'#6E9490'},
+      {label:'Flood · sensor half (%)', field:'flood_sensor_percent', color:'#C98A3A', dash:[6,4]},
+      {label:'Flood · season half (%)', field:'flood_climate_percent', color:'#6B9E78', dash:[2,3]},
     ],
     soil: [
       {label:'Soil moisture', field:'soil_moisture', color:'#6B9E78'},
@@ -949,6 +987,12 @@ function renderChart(rows){
   });
 }
 
+function pctBadge(pct, cat){
+  const label = cat ?? '—';
+  if(pct === undefined || pct === null || Number.isNaN(Number(pct))) return label;
+  return `${Number(pct).toFixed(0)}% ${label}`;
+}
+
 function renderTable(rows){
   const body = document.getElementById('logBody');
   document.getElementById('rowCount').textContent = `${rows.length} record${rows.length===1?'':'s'}`;
@@ -958,8 +1002,8 @@ function renderTable(rows){
   }
   const recent = rows.slice(-40).reverse();
   body.innerHTML = recent.map(r => {
-    const rs = rainStyle(r.rain_category_target);
-    const risk = riskLevel(r.flood_risk_target);
+    const rs = rainFromPercent(r.rain_percent, r.rain_category_target);
+    const risk = riskLevel(r.flood_risk_percent, r.flood_risk_target);
     const riskColorVar = risk.cls === 'alert' ? 'var(--alert)' : risk.cls === 'amber' ? 'var(--amber)' : 'var(--safe)';
     const riskBgVar = risk.cls === 'alert' ? 'var(--alert-dim)' : risk.cls === 'amber' ? 'var(--amber-dim)' : 'var(--safe-dim)';
     return `<tr>
@@ -970,8 +1014,8 @@ function renderTable(rows){
       <td>${fmt(r.pressure_loc2)}</td>
       <td>${fmt(r.rain_raw,2)}</td>
       <td>${fmt(r.soil_moisture,0)}</td>
-      <td><span class="badge-inline" style="background:${rs.bg}; color:${rs.color};">${r.rain_category_target ?? '—'}</span></td>
-      <td><span class="badge-inline" style="background:${riskBgVar}; color:${riskColorVar};">${r.flood_risk_target ?? '—'}</span></td>
+      <td><span class="badge-inline" style="background:${rs.bg}; color:${rs.color};">${pctBadge(r.rain_percent, r.rain_category_target)}</span></td>
+      <td><span class="badge-inline" style="background:${riskBgVar}; color:${riskColorVar};">${pctBadge(r.flood_risk_percent, r.flood_risk_target)}</span></td>
     </tr>`;
   }).join('');
 }

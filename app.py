@@ -1,17 +1,29 @@
 # ==============================================================================
 # Production Flask API — ESP32 Sensor Telemetry & 48h Weather/Flood Forecast
+#
+# Every index this API returns is a 0-100 percentage built as
+#
+#     final = CLIMATE_WEIGHT * climatology(date) + SENSOR_WEIGHT * model(sensors)
+#
+# with both weights fixed at 0.50 (see weather_features.py). The models
+# themselves receive no calendar features at all, so the season can influence the
+# answer only through the climatology term and can never outvote the sensors.
+# The legacy string categories are still returned, derived from the final
+# percentage, so existing clients keep working.
 # ==============================================================================
 
-import os
 import json
 import math
-import joblib
+import os
 import threading
 from datetime import datetime, timedelta
+
+import joblib
 import pandas as pd
-import numpy as np
-from flask import Flask, request, jsonify, send_from_directory, send_file
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
+
+import weather_features as wf
 
 # ------------------------------------------------------------------------------
 # 1. Initialization & Configuration
@@ -19,13 +31,14 @@ from flask_cors import CORS
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app)  # Enables Cross-Origin Resource Sharing for Frontend Integration
 
-ARTIFACTS_DIR = "model_artifacts"
+ARTIFACTS_DIR = os.environ.get("ARTIFACTS_DIR", "model_artifacts")
 DATA_DIR = "data"
 CSV_FILE_PATH = os.path.join(DATA_DIR, "telemetry_history.csv")
 
-# Thread lock to prevent race conditions during CSV read/write operations
-csv_lock = threading.Lock()
+# Feature engineering needs at most 24h of history; read a little more than that.
+HISTORY_WINDOW_HOURS = 26
 
+csv_lock = threading.Lock()
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ------------------------------------------------------------------------------
@@ -33,60 +46,76 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # ------------------------------------------------------------------------------
 print("⏳ Loading machine learning artifacts...")
 
-try:
-    with open(os.path.join(ARTIFACTS_DIR, "manifest.json"), "r") as f:
-        manifest = json.load(f)
+with open(os.path.join(ARTIFACTS_DIR, "manifest.json"), "r") as fh:
+    manifest = json.load(fh)
 
-    scaler = joblib.load(os.path.join(ARTIFACTS_DIR, "feature_scaler.joblib"))
-    FEATURE_COLS = manifest["feature_columns"]
-    HEAVY_THRESHOLD = manifest.get("heavy_rain_threshold", 0.20)
+with open(os.path.join(ARTIFACTS_DIR, "climatology.json"), "r") as fh:
+    climatology = json.load(fh)
 
-    regression_models = {
-        target: joblib.load(os.path.join(ARTIFACTS_DIR, f"model_{target}.joblib"))
-        for target in manifest["regression_targets"]
-    }
+scaler = joblib.load(os.path.join(ARTIFACTS_DIR, "feature_scaler.joblib"))
+FEATURE_COLS = manifest["feature_columns"]
+FEATURE_RANGES = manifest["feature_ranges"]
+MODEL_VERSION = manifest["model_version"]
 
-    classification_models = {
-        target: joblib.load(os.path.join(ARTIFACTS_DIR, f"model_{target}.joblib"))
-        for target in manifest["classification_targets"]
-    }
+models = {
+    target: joblib.load(os.path.join(ARTIFACTS_DIR, f"model_{target}.joblib"))
+    for target in manifest["regression_targets"] + manifest["index_targets"]
+}
 
-    classification_encoders = {
-        target: joblib.load(os.path.join(ARTIFACTS_DIR, f"encoder_{target}.joblib"))
-        for target in manifest["classification_targets"]
-    }
+leaked = [c for c in wf.TIME_COLUMNS if c in FEATURE_COLS]
+if leaked:
+    raise RuntimeError(
+        f"Artifacts in '{ARTIFACTS_DIR}' were trained with calendar features {leaked}. "
+        "Retrain with train_models.py — the calendar must enter only via the climatology."
+    )
 
-    print("✅ All artifacts successfully loaded into memory!")
-
-except Exception as e:
-    print(f"❌ Error loading model artifacts from '{ARTIFACTS_DIR}': {e}")
-    raise e
-
+print(f"✅ Artifacts loaded ({MODEL_VERSION}, {len(FEATURE_COLS)} sensor features)")
 
 # ------------------------------------------------------------------------------
 # 3. CSV Storage Engine
 # ------------------------------------------------------------------------------
-# All columns to be stored persistently in CSV
+PREDICTION_COLUMNS = [
+    "temperature_target",
+    "humidity_target",
+    "pressure_loc1_target",
+    "pressure_loc2_target",
+    "flood_risk_percent",
+    "flood_sensor_percent",
+    "flood_climate_percent",
+    "rain_percent",
+    "rain_sensor_percent",
+    "rain_climate_percent",
+    "temperature_percent",
+    "rain_category_target",
+    "flood_risk_target",
+]
+
 LOG_COLUMNS = (
-    ["timestamp"]
-    + FEATURE_COLS
-    + [
-        "temperature_target",
-        "humidity_target",
-        "pressure_loc1_target",
-        "pressure_loc2_target",
-        "rain_category_target",
-        "flood_risk_target",
-    ]
+    ["timestamp"] + wf.TIME_COLUMNS + wf.SENSOR_FEATURE_COLUMNS + PREDICTION_COLUMNS
 )
 
+
 def init_csv_storage():
-    """Initializes the CSV log file with headers if it does not exist."""
+    """
+    Create the log file, or move an incompatible one aside.
+
+    The v7 schema adds the percentage columns, so a log written by an older
+    build cannot be appended to — mixing the two would silently misalign every
+    column. The old file is renamed, never deleted.
+    """
     with csv_lock:
-        if not os.path.exists(CSV_FILE_PATH):
-            df_empty = pd.DataFrame(columns=LOG_COLUMNS)
-            df_empty.to_csv(CSV_FILE_PATH, index=False)
-            print(f"📁 Created initial storage log: {CSV_FILE_PATH}")
+        if os.path.exists(CSV_FILE_PATH) and os.path.getsize(CSV_FILE_PATH) > 0:
+            existing = pd.read_csv(CSV_FILE_PATH, nrows=0).columns.tolist()
+            if existing == LOG_COLUMNS:
+                return
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup = os.path.join(DATA_DIR, f"telemetry_history_pre_v7_{stamp}.csv")
+            os.rename(CSV_FILE_PATH, backup)
+            print(f"🗄️  Log schema changed; previous log preserved as {backup}")
+
+        pd.DataFrame(columns=LOG_COLUMNS).to_csv(CSV_FILE_PATH, index=False)
+        print(f"📁 Created storage log: {CSV_FILE_PATH}")
+
 
 init_csv_storage()
 
@@ -104,141 +133,88 @@ def sanitize_records(df: pd.DataFrame) -> list:
 
 
 def sanitize_record(d: dict) -> dict:
-    """Same NaN->None sanitization, but for a single dict (e.g. df.iloc[-1].to_dict())."""
-    clean = {}
-    for k, v in d.items():
-        if isinstance(v, float) and math.isnan(v):
-            clean[k] = None
-        else:
-            clean[k] = v
-    return clean
-
-
-# ------------------------------------------------------------------------------
-# 4. Feature Engineering Helpers (Real-Time Calculation)
-# ------------------------------------------------------------------------------
-def compute_time_features(dt: datetime) -> dict:
-    """Computes cyclical time features from datetime."""
-    hour = dt.hour + dt.minute / 60.0
-    doy = dt.timetuple().tm_yday
-
+    """Same NaN->None sanitization, but for a single dict."""
     return {
-        "hour_sin": math.sin(2 * math.pi * hour / 24.0),
-        "hour_cos": math.cos(2 * math.pi * hour / 24.0),
-        "doy_sin": math.sin(2 * math.pi * doy / 365.25),
-        "doy_cos": math.cos(2 * math.pi * doy / 365.25),
-        "month": dt.month,
+        k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in d.items()
     }
 
 
-def compute_derived_features(raw_data: dict, current_time: datetime) -> dict:
-    """
-    Computes rolling accumulation and trend features by reading recent history from CSV.
-    Falls back to sensible defaults if insufficient historical records exist.
-    """
-    p1_current = raw_data["pressure_loc1"]
-    p2_current = raw_data["pressure_loc2"]
-    h_current = raw_data["humidity"]
-    rain_raw = raw_data.get("rain_raw", 0.0)
-
-    # Defaults for cold start (empty CSV or new system initialization)
-    p1_trend_3h, p1_trend_6h = 0.0, 0.0
-    p2_trend_3h, p2_trend_6h = 0.0, 0.0
-    humidity_trend_3h = 0.0
-    rain_accum_6h = rain_raw
-    rain_accum_24h = rain_raw
-
+def read_recent_history(now: datetime) -> pd.DataFrame:
+    """Recent raw readings used to build trend and accumulation features."""
     with csv_lock:
-        if os.path.exists(CSV_FILE_PATH) and os.path.getsize(CSV_FILE_PATH) > 0:
-            try:
-                df_hist = pd.read_csv(CSV_FILE_PATH)
-                if not df_hist.empty:
-                    df_hist["dt"] = pd.to_datetime(df_hist["timestamp"])
+        if not os.path.exists(CSV_FILE_PATH) or os.path.getsize(CSV_FILE_PATH) == 0:
+            return pd.DataFrame()
+        try:
+            df = pd.read_csv(
+                CSV_FILE_PATH, usecols=["timestamp"] + wf.RAW_SENSOR_COLUMNS
+            )
+        except (ValueError, pd.errors.EmptyDataError) as exc:
+            print(f"⚠️  Could not read history for trend features: {exc}")
+            return pd.DataFrame()
 
-                    # 3-Hour Lookback
-                    t_3h = current_time - timedelta(hours=3)
-                    df_3h = df_hist[df_hist["dt"] >= t_3h]
-                    if not df_3h.empty:
-                        oldest_3h = df_3h.iloc[0]
-                        p1_trend_3h = p1_current - oldest_3h["pressure_loc1"]
-                        p2_trend_3h = p2_current - oldest_3h["pressure_loc2"]
-                        humidity_trend_3h = h_current - oldest_3h["humidity"]
+    if df.empty:
+        return df
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    cutoff = now - timedelta(hours=HISTORY_WINDOW_HOURS)
+    return df[df["timestamp"] >= cutoff].dropna(subset=["timestamp"]).sort_values("timestamp")
 
-                    # 6-Hour Lookback
-                    t_6h = current_time - timedelta(hours=6)
-                    df_6h = df_hist[df_hist["dt"] >= t_6h]
-                    if not df_6h.empty:
-                        oldest_6h = df_6h.iloc[0]
-                        p1_trend_6h = p1_current - oldest_6h["pressure_loc1"]
-                        p2_trend_6h = p2_current - oldest_6h["pressure_loc2"]
-                        rain_accum_6h = df_6h["rain_raw"].sum() + rain_raw
 
-                    # 24-Hour Lookback
-                    t_24h = current_time - timedelta(hours=24)
-                    df_24h = df_hist[df_hist["dt"] >= t_24h]
-                    if not df_24h.empty:
-                        rain_accum_24h = df_24h["rain_raw"].sum() + rain_raw
+# ------------------------------------------------------------------------------
+# 4. Core Model Inference Engine
+# ------------------------------------------------------------------------------
+def run_model_inference(feature_row: dict, now: datetime) -> tuple[dict, dict]:
+    """
+    Predict every 48h target for one reading.
 
-            except Exception as ex:
-                print(f"⚠️ Warning during trend calculation: {ex}")
+    Returns (predictions, diagnostics). `diagnostics` reports the separate
+    climatology and sensor halves of each index plus any feature that had to be
+    clipped back into the training range, so a bad reading is visible in the
+    response instead of silently distorting the answer.
+    """
+    clipped_row, clipped = wf.clip_to_training_range(feature_row, FEATURE_RANGES)
+    frame = pd.DataFrame([clipped_row])[FEATURE_COLS]
+    scaled = pd.DataFrame(scaler.transform(frame), columns=FEATURE_COLS)
 
-    return {
-        "pressure_loc1_trend_3h": float(p1_trend_3h),
-        "pressure_loc1_trend_6h": float(p1_trend_6h),
-        "pressure_loc2_trend_3h": float(p2_trend_3h),
-        "pressure_loc2_trend_6h": float(p2_trend_6h),
-        "pressure_diff": float(p1_current - p2_current),
-        "humidity_trend_3h": float(humidity_trend_3h),
-        "rain_rate": float(raw_data.get("rain_rate", rain_raw)),
-        "rain_accum_6h": float(rain_accum_6h),
-        "rain_accum_24h": float(rain_accum_24h),
+    predictions = {
+        "temperature_target": float(models["temperature_target"].predict(scaled)[0]),
+        "humidity_target": float(models["humidity_target"].predict(scaled)[0]),
     }
 
+    for now_col, target_col, delta_col in manifest["pressure_pairs"]:
+        delta = float(models[delta_col].predict(scaled)[0])
+        predictions[target_col] = float(feature_row[now_col]) + delta
 
-# ------------------------------------------------------------------------------
-# 5. Core Model Inference Engine
-# ------------------------------------------------------------------------------
-def run_model_inference(feature_dataframe: pd.DataFrame) -> dict:
-    """Runs input feature vectors through model pipeline."""
-    # Ensure strict feature ordering matching scaler training
-    X_input = feature_dataframe[FEATURE_COLS].copy()
-    X_scaled = pd.DataFrame(
-        scaler.transform(X_input), columns=FEATURE_COLS, index=X_input.index
+    diagnostics = {"clipped_features": clipped, "components": {}}
+
+    for index_target, clim_name, prefix, category_key, categoriser in [
+        ("flood_index_target", "flood_index", "flood_risk", "flood_risk_target", wf.flood_category),
+        ("rain_index_target", "rain_index", "rain", "rain_category_target", wf.rain_category),
+    ]:
+        sensor_pct = wf.clamp(float(models[index_target].predict(scaled)[0]), 0.0, 100.0)
+        climate_pct = wf.clamp(
+            wf.climatology_lookup(climatology, clim_name, now), 0.0, 100.0
+        )
+        blended = wf.blend_percent(climate_pct, sensor_pct)
+
+        predictions[f"{prefix}_percent"] = round(blended, 1)
+        predictions[f"{prefix.replace('_risk', '')}_sensor_percent"] = round(sensor_pct, 1)
+        predictions[f"{prefix.replace('_risk', '')}_climate_percent"] = round(climate_pct, 1)
+        predictions[category_key] = categoriser(blended)
+        diagnostics["components"][prefix] = {
+            "climatology_percent": round(climate_pct, 1),
+            "sensor_percent": round(sensor_pct, 1),
+            "weights": manifest["blend_weights"],
+        }
+
+    predictions["temperature_percent"] = round(
+        wf.temperature_to_percent(predictions["temperature_target"]), 1
     )
 
-    results = {}
-
-    # Direct Regressions (Temperature & Humidity)
-    for target in manifest["regression_targets"]:
-        if target in ["temperature_target", "humidity_target"]:
-            results[target] = float(regression_models[target].predict(X_scaled)[0])
-
-    # Pressure Delta Reconstruction
-    for now_col, target_col, delta_col in manifest["pressure_pairs"]:
-        pred_delta = regression_models[delta_col].predict(X_scaled)[0]
-        now_val = feature_dataframe[now_col].values[0]
-        results[target_col] = float(now_val + pred_delta)
-
-    # Classification Targets with Calibrated Threshold
-    for target in manifest["classification_targets"]:
-        model = classification_models[target]
-        encoder = classification_encoders[target]
-        probs = model.predict_proba(X_scaled)
-
-        preds_enc = np.argmax(probs, axis=1)
-
-        if target == "rain_category_target" and "heavy" in encoder.classes_:
-            heavy_idx = np.where(encoder.classes_ == "heavy")[0][0]
-            if probs[0, heavy_idx] >= HEAVY_THRESHOLD:
-                preds_enc[0] = heavy_idx
-
-        results[target] = str(encoder.inverse_transform(preds_enc)[0])
-
-    return results
+    return predictions, diagnostics
 
 
 # ------------------------------------------------------------------------------
-# 6. Frontend Route
+# 5. Frontend Route
 # ------------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def serve_dashboard():
@@ -247,84 +223,98 @@ def serve_dashboard():
 
 
 # ------------------------------------------------------------------------------
-# 7. API Routes / Endpoints
+# 6. API Routes / Endpoints
 # ------------------------------------------------------------------------------
-
 @app.route("/api/health", methods=["GET"])
 def health_check():
     """System health check endpoint."""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "model_version": "v6_calibrated",
-        "artifacts_directory": ARTIFACTS_DIR
-    }), 200
+    return (
+        jsonify(
+            {
+                "status": "healthy",
+                "timestamp": datetime.now().isoformat(),
+                "model_version": MODEL_VERSION,
+                "artifacts_directory": ARTIFACTS_DIR,
+                "blend_weights": manifest["blend_weights"],
+                "feature_count": len(FEATURE_COLS),
+            }
+        ),
+        200,
+    )
+
+
+@app.route("/api/model", methods=["GET"])
+def model_info():
+    """
+    Exposes the manifest so the scales behind the percentages are inspectable
+    (blend weights, index full-scale values, sensor calibration, test metrics).
+    """
+    return jsonify(manifest), 200
 
 
 @app.route("/api/telemetry", methods=["POST"])
 def receive_telemetry():
     """
-    POST Endpoint for ESP32.
-    Receives raw sensor readings, computes engineered features, executes model inference,
-    logs row to CSV, and returns real-time prediction output.
+    POST endpoint for the ESP32: raw sensor readings in, 48h percentages out.
+    Also appends the reading and its prediction to the CSV log.
     """
     try:
         data = request.get_json(force=True)
         if not data:
             return jsonify({"error": "Invalid or missing JSON payload"}), 400
 
-        # Required fields from ESP32
-        required_fields = [
-            "temperature", "humidity", "temp_bmp180", "pressure_loc1",
-            "temp_bmp280", "pressure_loc2", "rain_raw", "soil_moisture"
-        ]
-        missing = [field for field in required_fields if field not in data]
+        missing = [field for field in wf.RAW_SENSOR_COLUMNS if field not in data]
         if missing:
             return jsonify({"error": f"Missing required sensor fields: {missing}"}), 400
 
-        # Current Timestamp
         now = datetime.now()
         timestamp_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Compute Engineered Features
-        time_feats = compute_time_features(now)
-        derived_feats = compute_derived_features(data, now)
+        raw = {field: float(data[field]) for field in wf.RAW_SENSOR_COLUMNS}
+        history = read_recent_history(now)
+        derived = wf.derive_features(raw, now, history)
 
-        # Build complete feature dictionary
-        full_feature_row = {}
-        full_feature_row.update(time_feats)
-        for k in required_fields:
-            full_feature_row[k] = float(data[k])
-        full_feature_row.update(derived_feats)
+        feature_row = {**raw, **derived}
+        predictions, diagnostics = run_model_inference(feature_row, now)
 
-        df_features = pd.DataFrame([full_feature_row])
-
-        # Execute Predictions
-        predictions = run_model_inference(df_features)
-
-        # Assemble full log record
         log_record = {"timestamp": timestamp_str}
-        log_record.update(full_feature_row)
-        log_record.update(predictions)
+        log_record.update(wf.time_features(now))
+        log_record.update(feature_row)
+        log_record.update(
+            {k: v for k, v in predictions.items() if k in PREDICTION_COLUMNS}
+        )
 
-        # Append to CSV storage
         with csv_lock:
-            df_log = pd.DataFrame([log_record])
-            df_log[LOG_COLUMNS].to_csv(CSV_FILE_PATH, mode="a", header=False, index=False)
+            pd.DataFrame([log_record])[LOG_COLUMNS].to_csv(
+                CSV_FILE_PATH, mode="a", header=False, index=False
+            )
 
-        print(f"✅ Telemetry logged at {timestamp_str} | Rain: {predictions['rain_category_target'].upper()} | Flood Risk: {predictions['flood_risk_target'].upper()}")
+        print(
+            f"✅ {timestamp_str} | flood {predictions['flood_risk_percent']:.0f}% "
+            f"({predictions['flood_risk_target']}) | rain {predictions['rain_percent']:.0f}% "
+            f"({predictions['rain_category_target']}) | temp {predictions['temperature_target']:.1f}C"
+        )
 
-        return jsonify({
-            "status": "success",
-            "timestamp": timestamp_str,
-            "received_sensor_data": data,
-            "calculated_features": derived_feats,
-            "predictions_48h": predictions
-        }), 201
+        return (
+            jsonify(
+                {
+                    "status": "success",
+                    "timestamp": timestamp_str,
+                    "received_sensor_data": data,
+                    "calculated_features": derived,
+                    "predictions_48h": predictions,
+                    "diagnostics": diagnostics,
+                }
+            ),
+            201,
+        )
 
-    except Exception as e:
-        print(f"❌ Exception in /api/telemetry: {str(e)}")
-        return jsonify({"error": "Internal server processing error", "details": str(e)}), 500
+    except Exception as exc:  # noqa: BLE001 - surfaced to the caller below
+        print(f"❌ Exception in /api/telemetry: {exc}")
+        return (
+            jsonify({"error": "Internal server processing error", "details": str(exc)}),
+            500,
+        )
 
 
 @app.route("/api/latest", methods=["GET"])
@@ -333,17 +323,16 @@ def get_latest():
     try:
         with csv_lock:
             if not os.path.exists(CSV_FILE_PATH):
-                return jsonify({"error": "No historical log available yet"}), 444
+                return jsonify({"error": "No historical log available yet"}), 404
 
             df = pd.read_csv(CSV_FILE_PATH)
             if df.empty:
                 return jsonify({"message": "Database log is empty"}), 200
 
-            latest_record = sanitize_record(df.iloc[-1].to_dict())
-            return jsonify(latest_record), 200
-    except Exception as e:
-        print(f"❌ Exception in /api/latest: {str(e)}")
-        return jsonify({"error": "Failed to read latest record", "details": str(e)}), 500
+            return jsonify(sanitize_record(df.iloc[-1].to_dict())), 200
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ Exception in /api/latest: {exc}")
+        return jsonify({"error": "Failed to read latest record", "details": str(exc)}), 500
 
 
 @app.route("/api/history", methods=["GET"])
@@ -354,10 +343,8 @@ def get_history():
       - limit: int (default: 100, max: 2000)
       - order: 'desc' or 'asc' (default: 'desc')
     """
-    limit = request.args.get("limit", default=100, type=int)
+    limit = min(max(1, request.args.get("limit", default=100, type=int)), 2000)
     order = request.args.get("order", default="desc", type=str).lower()
-
-    limit = min(max(1, limit), 2000)  # Bound limit between 1 and 2000
 
     try:
         with csv_lock:
@@ -368,20 +355,15 @@ def get_history():
             if df.empty:
                 return jsonify({"count": 0, "order": order, "data": []}), 200
 
+            sliced = df.tail(limit)
             if order == "desc":
-                df_sliced = df.tail(limit).iloc[::-1]
-            else:
-                df_sliced = df.tail(limit)
+                sliced = sliced.iloc[::-1]
 
-            records = sanitize_records(df_sliced)
-            return jsonify({
-                "count": len(records),
-                "order": order,
-                "data": records
-            }), 200
-    except Exception as e:
-        print(f"❌ Exception in /api/history: {str(e)}")
-        return jsonify({"error": "Failed to read history", "details": str(e)}), 500
+            records = sanitize_records(sliced)
+            return jsonify({"count": len(records), "order": order, "data": records}), 200
+    except Exception as exc:  # noqa: BLE001
+        print(f"❌ Exception in /api/history: {exc}")
+        return jsonify({"error": "Failed to read history", "details": str(exc)}), 500
 
 
 @app.route("/api/export", methods=["GET"])
@@ -396,14 +378,12 @@ def export_csv():
         if not os.path.exists(CSV_FILE_PATH):
             return jsonify({"error": "No historical log available yet"}), 404
 
-        timestamp_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
-        download_name = f"telemetry_history_{timestamp_suffix}.csv"
-
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return send_file(
             CSV_FILE_PATH,
             mimetype="text/csv",
             as_attachment=True,
-            download_name=download_name,
+            download_name=f"telemetry_history_{stamp}.csv",
         )
 
 
@@ -413,43 +393,44 @@ def reset_csv():
     Wipes the live telemetry log so new readings start accumulating from
     scratch (e.g. after test data or a schema change has polluted the
     rolling 6h/24h trend features). Does NOT delete data outright — the
-    existing CSV is renamed into a timestamped backup first, so nothing
-    is unrecoverably lost even on an accidental click.
+    existing CSV is renamed into a timestamped backup first.
 
-    Requires a JSON body {"confirm": true} to guard against this being
-    triggered by anything other than a deliberate frontend action (a bare
-    GET-able endpoint would be too easy to hit by accident via a stray link
-    or crawler).
+    Requires a JSON body {"confirm": true} so a stray link or crawler cannot
+    trigger it.
     """
     payload = request.get_json(silent=True) or {}
     if payload.get("confirm") is not True:
-        return jsonify({"error": "Reset requires JSON body {\"confirm\": true}"}), 400
+        return jsonify({"error": 'Reset requires JSON body {"confirm": true}'}), 400
 
     with csv_lock:
         backup_name = None
         if os.path.exists(CSV_FILE_PATH) and os.path.getsize(CSV_FILE_PATH) > 0:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_name = f"telemetry_history_backup_{stamp}.csv"
-            backup_path = os.path.join(DATA_DIR, backup_name)
-            os.rename(CSV_FILE_PATH, backup_path)
-            print(f"🗄️  Backed up existing log to: {backup_path}")
+            os.rename(CSV_FILE_PATH, os.path.join(DATA_DIR, backup_name))
+            print(f"🗄️  Backed up existing log to: {backup_name}")
 
-        df_empty = pd.DataFrame(columns=LOG_COLUMNS)
-        df_empty.to_csv(CSV_FILE_PATH, index=False)
+        pd.DataFrame(columns=LOG_COLUMNS).to_csv(CSV_FILE_PATH, index=False)
         print(f"🧹 Reset {CSV_FILE_PATH} — logging starts fresh from here.")
 
-    return jsonify({
-        "status": "reset",
-        "backup_created": backup_name,
-        "message": (
-            f"Live log cleared. Prior data preserved as '{backup_name}' in {DATA_DIR}/."
-            if backup_name else "Live log was already empty; nothing to back up."
-        )
-    }), 200
+    return (
+        jsonify(
+            {
+                "status": "reset",
+                "backup_created": backup_name,
+                "message": (
+                    f"Live log cleared. Prior data preserved as '{backup_name}' in {DATA_DIR}/."
+                    if backup_name
+                    else "Live log was already empty; nothing to back up."
+                ),
+            }
+        ),
+        200,
+    )
 
 
 # ------------------------------------------------------------------------------
-# 8. Server Start
+# 7. Server Start
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
     # Host on 0.0.0.0 so ESP32 on local network can communicate with Flask host
