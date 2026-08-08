@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Only the gzipped dataset is tracked; the expanded copy is ~16 MB.
+weather_flood_dataset.csv
+
+# WiFi credentials for the firmware.
+firmware/weather_station/arduino_secrets.h
+
+# Live telemetry log and its rotated backups are runtime state.
+data/telemetry_history_backup_*.csv
+data/telemetry_history_pre_v7_*.csv

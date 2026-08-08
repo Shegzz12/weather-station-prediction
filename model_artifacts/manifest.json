@@ -1,10 +1,6 @@
 {
+  "model_version": "v7_blended_index",
   "feature_columns": [
-    "hour_sin",
-    "hour_cos",
-    "doy_sin",
-    "doy_cos",
-    "month",
     "temperature",
     "humidity",
     "temp_bmp180",
@@ -13,21 +9,34 @@
     "pressure_loc2",
     "rain_raw",
     "soil_moisture",
+    "soil_saturation_pct",
+    "rain_rate",
+    "rain_accum_6h",
+    "rain_accum_24h",
     "pressure_loc1_trend_3h",
     "pressure_loc1_trend_6h",
     "pressure_loc2_trend_3h",
     "pressure_loc2_trend_6h",
     "pressure_diff",
     "humidity_trend_3h",
-    "rain_rate",
-    "rain_accum_6h",
-    "rain_accum_24h"
+    "temperature_trend_3h"
+  ],
+  "excluded_time_columns": [
+    "hour_sin",
+    "hour_cos",
+    "doy_sin",
+    "doy_cos",
+    "month"
   ],
   "regression_targets": [
     "temperature_target",
     "humidity_target",
     "pressure_loc1_target_delta",
     "pressure_loc2_target_delta"
+  ],
+  "index_targets": [
+    "flood_index_target",
+    "rain_index_target"
   ],
   "pressure_pairs": [
     [
@@ -41,48 +50,220 @@
       "pressure_loc2_target_delta"
     ]
   ],
-  "classification_targets": [
-    "rain_category_target",
-    "flood_risk_target"
-  ],
-  "block_steps": 672,
-  "embargo_steps": 192,
-  "heavy_rain_threshold": 0.2,
-  "gbm_backend": "lightgbm",
-  "regression_metrics": {
-    "temperature_target": {
-      "MAE": 0.5490542653056194,
-      "MedAE": 0.4454728593524333,
-      "RMSE": 0.6913898527459786,
-      "R2": 0.9695803088906534
+  "blend_weights": {
+    "climatology": 0.5,
+    "sensor": 0.5
+  },
+  "index_scales": {
+    "rain_index_full_scale_mm": 120.0,
+    "flood_rain_weight": 0.6,
+    "flood_saturation_weight": 0.4,
+    "temp_percent_min_c": 15.0,
+    "temp_percent_max_c": 45.0
+  },
+  "calibration": {
+    "rain_adc_dry": 4095.0,
+    "rain_adc_wet": 1200.0,
+    "soil_adc_dry": 4095.0,
+    "soil_adc_sat": 1000.0,
+    "rain_rate_full_scale_mm_h": 40.0
+  },
+  "category_thresholds": {
+    "flood": [
+      [
+        25.0,
+        "low"
+      ],
+      [
+        60.0,
+        "watch"
+      ],
+      [
+        null,
+        "high"
+      ]
+    ],
+    "rain": [
+      [
+        20.0,
+        "dry"
+      ],
+      [
+        45.0,
+        "light"
+      ],
+      [
+        70.0,
+        "moderate"
+      ],
+      [
+        null,
+        "heavy"
+      ]
+    ]
+  },
+  "feature_ranges": {
+    "temperature": {
+      "min": 11.45,
+      "max": 39.82
     },
-    "humidity_target": {
-      "MAE": 2.541453894325177,
-      "MedAE": 2.1214193131200787,
-      "RMSE": 3.182315487733673,
-      "R2": 0.946170310668793
+    "humidity": {
+      "min": 20.0,
+      "max": 100.0
     },
-    "pressure_loc1_target_delta": {
-      "MAE": 289.0570143739378,
-      "MedAE": 250.94499768117203,
-      "RMSE": 359.9707534070071,
-      "R2": 0.004807781319193238
+    "temp_bmp180": {
+      "min": 12.29,
+      "max": 40.9
     },
-    "pressure_loc2_target_delta": {
-      "MAE": 287.7155743009995,
-      "MedAE": 249.05526749566468,
-      "RMSE": 356.531645589843,
-      "R2": 0.01978183534426159
+    "pressure_loc1": {
+      "min": 98079.0,
+      "max": 99192.8
+    },
+    "temp_bmp280": {
+      "min": 12.07,
+      "max": 40.96
+    },
+    "pressure_loc2": {
+      "min": 98111.5,
+      "max": 99299.3
+    },
+    "rain_raw": {
+      "min": 1143.0,
+      "max": 4095.0
+    },
+    "soil_moisture": {
+      "min": 882.0,
+      "max": 4095.0
+    },
+    "soil_saturation_pct": {
+      "min": 0.0,
+      "max": 100.0
+    },
+    "rain_rate": {
+      "min": 0.0,
+      "max": 40.0
+    },
+    "rain_accum_6h": {
+      "min": 0.0,
+      "max": 219.413
+    },
+    "rain_accum_24h": {
+      "min": 0.0,
+      "max": 320.988
+    },
+    "pressure_loc1_trend_3h": {
+      "min": -356.1,
+      "max": 588.0
+    },
+    "pressure_loc1_trend_6h": {
+      "min": -500.0,
+      "max": 668.4
+    },
+    "pressure_loc2_trend_3h": {
+      "min": -387.7,
+      "max": 655.2
+    },
+    "pressure_loc2_trend_6h": {
+      "min": -596.5,
+      "max": 753.7
+    },
+    "pressure_diff": {
+      "min": -186.5,
+      "max": 18.4
+    },
+    "humidity_trend_3h": {
+      "min": -47.34,
+      "max": 52.34
+    },
+    "temperature_trend_3h": {
+      "min": -11.66,
+      "max": 12.32
     }
   },
-  "classification_metrics": {
-    "rain_category_target": {
-      "accuracy": 0.6098484848484849,
-      "f1_macro": 0.4360793071504991
+  "dataset": {
+    "path": "weather_flood_dataset.csv.gz",
+    "rows": 70032,
+    "interval_min": 30.0,
+    "first_timestamp": "2021-01-01 00:00:00",
+    "last_timestamp": "2024-12-29 23:30:00"
+  },
+  "gbm_backend": "lightgbm",
+  "library_versions": {
+    "scikit-learn": "1.6.0",
+    "lightgbm": "4.7.0",
+    "pandas": "2.2.3",
+    "numpy": "2.2.1",
+    "joblib": "1.4.2"
+  },
+  "model_metrics": {
+    "temperature_target": {
+      "MAE": 0.8272714130385245,
+      "RMSE": 1.1447082611243824,
+      "R2": 0.9440988388971036
     },
-    "flood_risk_target": {
-      "accuracy": 0.8020833333333334,
-      "f1_macro": 0.7753538923156298
+    "humidity_target": {
+      "MAE": 8.466473144459025,
+      "RMSE": 10.72702126392277,
+      "R2": 0.5629848345956752
+    },
+    "pressure_loc1_target_delta": {
+      "MAE": 95.1760371675627,
+      "RMSE": 123.29827574656113,
+      "R2": 0.27828139727875967
+    },
+    "pressure_loc2_target_delta": {
+      "MAE": 104.30011285943625,
+      "RMSE": 137.05395121081764,
+      "R2": 0.3139214949440188
+    },
+    "flood_index_target": {
+      "MAE": 19.28174289229885,
+      "RMSE": 24.298682519003275,
+      "R2": 0.4213566593296858
+    },
+    "rain_index_target": {
+      "MAE": 26.468038524478427,
+      "RMSE": 32.822921108252025,
+      "R2": 0.1688557256386619
     }
-  }
+  },
+  "blend_metrics": {
+    "flood_index_target": {
+      "blended": {
+        "MAE": 18.934773592932277,
+        "RMSE": 23.631444701533706,
+        "R2": 0.45269923917509425
+      },
+      "sensor_only": {
+        "MAE": 19.28174289229885,
+        "RMSE": 24.298682519003275,
+        "R2": 0.4213566593296858
+      },
+      "climatology_only": {
+        "MAE": 20.4066573754085,
+        "RMSE": 25.636535348850828,
+        "R2": 0.35588387705662006
+      },
+      "category_agreement": 0.5824754901960785
+    },
+    "rain_index_target": {
+      "blended": {
+        "MAE": 26.88610092339096,
+        "RMSE": 33.22517937477965,
+        "R2": 0.14835886872496107
+      },
+      "sensor_only": {
+        "MAE": 26.468038524478427,
+        "RMSE": 32.822921108252025,
+        "R2": 0.1688557256386619
+      },
+      "climatology_only": {
+        "MAE": 28.096682936580883,
+        "RMSE": 35.64215187366737,
+        "R2": 0.01994648081922934
+      },
+      "category_agreement": 0.3620098039215686
+    }
+  },
+  "blend_metrics_note": "Scored with a climatology table fitted on train rows only; the shipped climatology.json is fitted on every year in the dataset."
 }
