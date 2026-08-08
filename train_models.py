@@ -167,26 +167,6 @@ def main() -> None:
         shutil.rmtree(args.out)
     os.makedirs(args.out, exist_ok=True)
 
-    # --- Climatology: the calendar half of the prediction ----------------------
-    # Built from the ground-truth index targets, i.e. the average seasonal risk
-    # for each day of the year across all simulated years. This is an explicit
-    # lookup table, not a model, so its influence is exactly CLIMATE_WEIGHT.
-    print("\n--- Building climatology table ---")
-    climatology = wf.build_climatology(
-        df["timestamp"],
-        {
-            "flood_index": df["flood_index_target"],
-            "rain_index": df["rain_index_target"],
-            "temperature": df["temperature_target"],
-        },
-    )
-    with open(os.path.join(args.out, "climatology.json"), "w") as fh:
-        json.dump(climatology, fh)
-    print(
-        f"  flood_index climatology range: "
-        f"{min(climatology['flood_index']):.1f} - {max(climatology['flood_index']):.1f}%"
-    )
-
     # --- Split -----------------------------------------------------------------
     print("\n--- Splitting ---")
     df_split = chronological_split(df, interval_min)
@@ -207,6 +187,35 @@ def main() -> None:
 
     X_train, X_val, X_test = scale(train_df), scale(val_df), scale(test_df)
     joblib.dump(scaler, os.path.join(args.out, "feature_scaler.joblib"))
+
+    # --- Climatology: the calendar half of the prediction ----------------------
+    # The average ground-truth index per day of year: an explicit lookup table,
+    # not a model, so its influence is exactly CLIMATE_WEIGHT. Two tables are
+    # built on purpose. The shipped one uses every year available, since more
+    # years make a better seasonal average and the served table has no test set
+    # to leak from. The metrics below must not be scored against a table that
+    # was averaged over the very rows being scored, so they use a train-only
+    # table instead.
+    print("\n--- Building climatology tables ---")
+
+    def climatology_from(frame: pd.DataFrame) -> dict:
+        return wf.build_climatology(
+            frame["timestamp"],
+            {
+                "flood_index": frame["flood_index_target"],
+                "rain_index": frame["rain_index_target"],
+                "temperature": frame["temperature_target"],
+            },
+        )
+
+    climatology = climatology_from(df)
+    climatology_train = climatology_from(train_df)
+    with open(os.path.join(args.out, "climatology.json"), "w") as fh:
+        json.dump(climatology, fh)
+    print(
+        f"  flood_index climatology range: "
+        f"{min(climatology['flood_index']):.1f} - {max(climatology['flood_index']):.1f}%"
+    )
 
     # Recorded so the API can clip out-of-distribution input instead of
     # extrapolating off the end of a tree.
@@ -245,7 +254,11 @@ def main() -> None:
         print(f"    {target_col:26s} MAE={mae:.1f} Pa")
 
     # --- Evaluate the blended output, which is what the API returns ------------
+    # Scored with the train-only climatology so the seasonal half is genuinely
+    # held out; the shipped table is fitted on all years and will do slightly
+    # better in practice than these numbers suggest.
     print("\n===== Blended (50% climatology + 50% sensor) test performance =====")
+    print("  (climatology half fitted on train rows only)")
     blend_metrics = {}
     for index_target, clim_name in [
         ("flood_index_target", "flood_index"),
@@ -253,7 +266,10 @@ def main() -> None:
     ]:
         sensor_pred = np.clip(models[index_target].predict(X_test), 0.0, 100.0)
         clim_pred = np.array(
-            [wf.climatology_lookup(climatology, clim_name, ts) for ts in test_df["timestamp"]]
+            [
+                wf.climatology_lookup(climatology_train, clim_name, ts)
+                for ts in test_df["timestamp"]
+            ]
         )
         blended = wf.CLIMATE_WEIGHT * clim_pred + wf.SENSOR_WEIGHT * sensor_pred
         truth = test_df[index_target].to_numpy()
@@ -335,6 +351,10 @@ def main() -> None:
         },
         "model_metrics": model_metrics,
         "blend_metrics": blend_metrics,
+        "blend_metrics_note": (
+            "Scored with a climatology table fitted on train rows only; the "
+            "shipped climatology.json is fitted on every year in the dataset."
+        ),
     }
     with open(os.path.join(args.out, "manifest.json"), "w") as fh:
         json.dump(manifest, fh, indent=2, default=str)

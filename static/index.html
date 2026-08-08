@@ -6,7 +6,7 @@
 <title>Station Log — Telemetry &amp; 48h Forecast</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root{
     --bg-deep:#0B1F26;
@@ -744,17 +744,31 @@ function trendBadge(val){
 // The API returns a 0-100 percentage now, so the gauge reads it directly instead
 // of snapping to one of three positions inferred from the category string. The
 // category is still shown, and is still what older records fall back to.
-function pctClass(pct){
+// Bands mirror FLOOD_CATEGORY_THRESHOLDS / RAIN_CATEGORY_THRESHOLDS in
+// weather_features.py, so the colour always agrees with the category word the
+// backend derived from the same percentage.
+function floodPctClass(pct){
   if(pct >= 60) return 'alert';
   if(pct >= 25) return 'amber';
   return 'safe';
 }
+function rainPctClass(pct){
+  if(pct >= 70) return 'alert';
+  if(pct >= 45) return 'amber';
+  return 'safe';
+}
 function riskLevel(pct, cat){
   if(pct === null || pct === undefined || Number.isNaN(Number(pct))){
-    return {frac:0.1, cls:'safe', label:'no data', pct:null};
+    // Older records carry only the category, so map it back to a needle
+    // position rather than reporting nothing.
+    if(!cat) return {frac:0.1, cls:'safe', label:'no data', pct:null};
+    const c = String(cat).toLowerCase();
+    if(/high|severe|extreme/.test(c)) return {frac:0.85, cls:'alert', label:cat, pct:null};
+    if(/watch|moderate|medium/.test(c)) return {frac:0.5, cls:'amber', label:cat, pct:null};
+    return {frac:0.15, cls:'safe', label:cat, pct:null};
   }
   const p = Math.max(0, Math.min(100, Number(pct)));
-  return {frac:p/100, cls:pctClass(p), label:cat || '—', pct:p};
+  return {frac:p/100, cls:floodPctClass(p), label:cat || '—', pct:p};
 }
 function heatStyle(tempC){
   if(tempC === null || tempC === undefined || Number.isNaN(tempC)){
@@ -861,7 +875,7 @@ async function pollLatest(){
     setNeedle(risk.frac);
     const readoutEl = document.getElementById('floodReadout');
     readoutEl.textContent = risk.pct === null
-      ? 'NO DATA'
+      ? String(risk.label).toUpperCase()
       : `${risk.pct.toFixed(0)}% · ${String(risk.label).toUpperCase()}`;
     readoutEl.className = 'gauge-readout ' + risk.cls;
     document.getElementById('floodSub').textContent = splitLine(
@@ -873,7 +887,8 @@ async function pollLatest(){
     rainLabelEl.textContent = rs.pct === undefined || rs.pct === null
       ? (rainCat ? String(rainCat).toUpperCase() : 'NO DATA')
       : `${rs.pct.toFixed(0)}% · ${String(rainCat || '—').toUpperCase()}`;
-    rainLabelEl.className = 'rain-category-label ' + (rs.pct === undefined ? (rs.cls || 'safe') : pctClass(rs.pct));
+    rainLabelEl.className = 'rain-category-label ' +
+      (rs.pct === undefined || rs.pct === null ? (rs.cls || 'safe') : rainPctClass(rs.pct));
     document.getElementById('rainCategorySub').textContent = splitLine(
       r.rain_climate_percent, r.rain_sensor_percent, r.timestamp);
     document.getElementById('rainOutlookRate').innerHTML = `${fmt(r.rain_rate,2)}<small>mm/hr</small>`;

@@ -16,6 +16,7 @@ import json
 import math
 import os
 import threading
+import traceback
 from datetime import datetime, timedelta
 
 import joblib
@@ -309,12 +310,12 @@ def receive_telemetry():
             201,
         )
 
-    except Exception as exc:  # noqa: BLE001 - surfaced to the caller below
-        print(f"❌ Exception in /api/telemetry: {exc}")
-        return (
-            jsonify({"error": "Internal server processing error", "details": str(exc)}),
-            500,
-        )
+    except Exception:
+        # Logged in full server-side; the response stays generic because this
+        # endpoint is unauthenticated and exception text carries filesystem
+        # paths and internal column names.
+        traceback.print_exc()
+        return jsonify({"error": "Internal server processing error"}), 500
 
 
 @app.route("/api/latest", methods=["GET"])
@@ -330,9 +331,9 @@ def get_latest():
                 return jsonify({"message": "Database log is empty"}), 200
 
             return jsonify(sanitize_record(df.iloc[-1].to_dict())), 200
-    except Exception as exc:  # noqa: BLE001
-        print(f"❌ Exception in /api/latest: {exc}")
-        return jsonify({"error": "Failed to read latest record", "details": str(exc)}), 500
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Failed to read latest record"}), 500
 
 
 @app.route("/api/history", methods=["GET"])
@@ -361,9 +362,9 @@ def get_history():
 
             records = sanitize_records(sliced)
             return jsonify({"count": len(records), "order": order, "data": records}), 200
-    except Exception as exc:  # noqa: BLE001
-        print(f"❌ Exception in /api/history: {exc}")
-        return jsonify({"error": "Failed to read history", "details": str(exc)}), 500
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Failed to read history"}), 500
 
 
 @app.route("/api/export", methods=["GET"])
