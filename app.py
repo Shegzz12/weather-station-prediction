@@ -10,11 +10,18 @@
 # answer only through the climatology term and can never outvote the sensors.
 # The legacy string categories are still returned, derived from the final
 # percentage, so existing clients keep working.
+#
+# LOGGING: every incoming request is logged before routing, and every
+# response's status code is logged after the route runs, so Render's log
+# stream shows full request/response traffic — not just requests that
+# happen to hit our own exception handlers. See section 1b below.
 # ==============================================================================
 
 import json
+import logging
 import math
 import os
+import sys
 import threading
 import traceback
 from datetime import datetime, timedelta
@@ -43,9 +50,73 @@ csv_lock = threading.Lock()
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ------------------------------------------------------------------------------
+# 1b. Logging — request/response visibility on Render
+# ------------------------------------------------------------------------------
+# Render captures whatever the process writes to stdout/stderr as the service
+# log, so a plain stream handler on stdout is enough for these lines to show
+# up live in the Render dashboard's Logs tab.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger("telemetry_api")
+
+
+@app.before_request
+def log_incoming_request():
+    """
+    Logs every incoming request before it reaches a route handler, so the
+    Render log stream shows *all* traffic — including requests that get
+    rejected before our own route logic runs — not only the ones that reach
+    an explicit log line or exception handler inside a view function.
+    """
+    body_preview = ""
+    if request.method in ("POST", "PUT", "PATCH"):
+        try:
+            # cache=True is required here: it lets Werkzeug buffer the body
+            # so request.get_json()/request.get_data() inside the route can
+            # still read it afterward. Without cache=True the stream would
+            # already be consumed and every POST would 400 on missing JSON.
+            raw = request.get_data(cache=True, as_text=True)
+            body_preview = f" body={raw[:500]!r}" if raw else " body=<empty>"
+        except Exception as exc:  # pragma: no cover - defensive only
+            body_preview = f" body=<unreadable: {exc}>"
+
+    log.info(
+        "--> %s %s from %s%s",
+        request.method,
+        request.path,
+        request.headers.get("X-Forwarded-For", request.remote_addr),
+        body_preview,
+    )
+
+
+@app.after_request
+def log_response_status(response):
+    """Logs the outcome of every request, matched against the line above."""
+    log.info("<-- %s %s -> %s", request.method, request.path, response.status_code)
+    return response
+
+
+@app.errorhandler(Exception)
+def log_unhandled_exception(exc):
+    """
+    Safety net for anything that escapes a route's own try/except (e.g. a
+    routing error, or a bug in a handler that doesn't wrap its body). Logs
+    the full traceback through the same logger — Render's log stream is the
+    single place to look, instead of some errors surfacing only via
+    traceback.print_exc() in a different format.
+    """
+    log.error("Unhandled exception on %s %s:\n%s", request.method, request.path,
+               traceback.format_exc())
+    return jsonify({"error": "Internal server processing error"}), 500
+
+
+# ------------------------------------------------------------------------------
 # 2. Load Model Artifacts & Manifest
 # ------------------------------------------------------------------------------
-print("⏳ Loading machine learning artifacts...")
+log.info("Loading machine learning artifacts...")
 
 with open(os.path.join(ARTIFACTS_DIR, "manifest.json"), "r") as fh:
     manifest = json.load(fh)
@@ -70,7 +141,7 @@ if leaked:
         "Retrain with train_models.py — the calendar must enter only via the climatology."
     )
 
-print(f"✅ Artifacts loaded ({MODEL_VERSION}, {len(FEATURE_COLS)} sensor features)")
+log.info("Artifacts loaded (%s, %d sensor features)", MODEL_VERSION, len(FEATURE_COLS))
 
 # ------------------------------------------------------------------------------
 # 3. CSV Storage Engine
@@ -112,10 +183,10 @@ def init_csv_storage():
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup = os.path.join(DATA_DIR, f"telemetry_history_pre_v7_{stamp}.csv")
             os.rename(CSV_FILE_PATH, backup)
-            print(f"🗄️  Log schema changed; previous log preserved as {backup}")
+            log.warning("Log schema changed; previous log preserved as %s", backup)
 
         pd.DataFrame(columns=LOG_COLUMNS).to_csv(CSV_FILE_PATH, index=False)
-        print(f"📁 Created storage log: {CSV_FILE_PATH}")
+        log.info("Created storage log: %s", CSV_FILE_PATH)
 
 
 init_csv_storage()
@@ -150,7 +221,7 @@ def read_recent_history(now: datetime) -> pd.DataFrame:
                 CSV_FILE_PATH, usecols=["timestamp"] + wf.RAW_SENSOR_COLUMNS
             )
         except (ValueError, pd.errors.EmptyDataError) as exc:
-            print(f"⚠️  Could not read history for trend features: {exc}")
+            log.warning("Could not read history for trend features: %s", exc)
             return pd.DataFrame()
 
     if df.empty:
@@ -173,6 +244,9 @@ def run_model_inference(feature_row: dict, now: datetime) -> tuple[dict, dict]:
     response instead of silently distorting the answer.
     """
     clipped_row, clipped = wf.clip_to_training_range(feature_row, FEATURE_RANGES)
+    if clipped:
+        log.warning("Clipped out-of-range features: %s", clipped)
+
     frame = pd.DataFrame([clipped_row])[FEATURE_COLS]
     scaled = pd.DataFrame(scaler.transform(frame), columns=FEATURE_COLS)
 
@@ -262,10 +336,15 @@ def receive_telemetry():
     try:
         data = request.get_json(force=True)
         if not data:
+            log.warning("Rejected telemetry: invalid or missing JSON payload")
             return jsonify({"error": "Invalid or missing JSON payload"}), 400
 
         missing = [field for field in wf.RAW_SENSOR_COLUMNS if field not in data]
         if missing:
+            log.warning(
+                "Rejected telemetry: missing required sensor fields %s (got keys: %s)",
+                missing, list(data.keys()),
+            )
             return jsonify({"error": f"Missing required sensor fields: {missing}"}), 400
 
         now = datetime.now()
@@ -290,10 +369,12 @@ def receive_telemetry():
                 CSV_FILE_PATH, mode="a", header=False, index=False
             )
 
-        print(
-            f"✅ {timestamp_str} | flood {predictions['flood_risk_percent']:.0f}% "
-            f"({predictions['flood_risk_target']}) | rain {predictions['rain_percent']:.0f}% "
-            f"({predictions['rain_category_target']}) | temp {predictions['temperature_target']:.1f}C"
+        log.info(
+            "%s | flood %.0f%% (%s) | rain %.0f%% (%s) | temp %.1fC",
+            timestamp_str,
+            predictions["flood_risk_percent"], predictions["flood_risk_target"],
+            predictions["rain_percent"], predictions["rain_category_target"],
+            predictions["temperature_target"],
         )
 
         return (
@@ -311,10 +392,10 @@ def receive_telemetry():
         )
 
     except Exception:
-        # Logged in full server-side; the response stays generic because this
-        # endpoint is unauthenticated and exception text carries filesystem
-        # paths and internal column names.
-        traceback.print_exc()
+        # Full traceback goes to the log (visible in Render); the response
+        # stays generic because this endpoint is unauthenticated and
+        # exception text carries filesystem paths and internal column names.
+        log.error("Exception in /api/telemetry:\n%s", traceback.format_exc())
         return jsonify({"error": "Internal server processing error"}), 500
 
 
@@ -324,15 +405,17 @@ def get_latest():
     try:
         with csv_lock:
             if not os.path.exists(CSV_FILE_PATH):
+                log.warning("GET /api/latest: no log file yet")
                 return jsonify({"error": "No historical log available yet"}), 404
 
             df = pd.read_csv(CSV_FILE_PATH)
             if df.empty:
+                log.info("GET /api/latest: log file empty")
                 return jsonify({"message": "Database log is empty"}), 200
 
             return jsonify(sanitize_record(df.iloc[-1].to_dict())), 200
     except Exception:
-        traceback.print_exc()
+        log.error("Exception in /api/latest:\n%s", traceback.format_exc())
         return jsonify({"error": "Failed to read latest record"}), 500
 
 
@@ -363,7 +446,7 @@ def get_history():
             records = sanitize_records(sliced)
             return jsonify({"count": len(records), "order": order, "data": records}), 200
     except Exception:
-        traceback.print_exc()
+        log.error("Exception in /api/history:\n%s", traceback.format_exc())
         return jsonify({"error": "Failed to read history"}), 500
 
 
@@ -377,6 +460,7 @@ def export_csv():
     """
     with csv_lock:
         if not os.path.exists(CSV_FILE_PATH):
+            log.warning("GET /api/export: no log file yet")
             return jsonify({"error": "No historical log available yet"}), 404
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -401,6 +485,7 @@ def reset_csv():
     """
     payload = request.get_json(silent=True) or {}
     if payload.get("confirm") is not True:
+        log.warning("Reset rejected: missing/false confirm flag (payload=%s)", payload)
         return jsonify({"error": 'Reset requires JSON body {"confirm": true}'}), 400
 
     with csv_lock:
@@ -409,10 +494,10 @@ def reset_csv():
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_name = f"telemetry_history_backup_{stamp}.csv"
             os.rename(CSV_FILE_PATH, os.path.join(DATA_DIR, backup_name))
-            print(f"🗄️  Backed up existing log to: {backup_name}")
+            log.warning("Backed up existing log to: %s", backup_name)
 
         pd.DataFrame(columns=LOG_COLUMNS).to_csv(CSV_FILE_PATH, index=False)
-        print(f"🧹 Reset {CSV_FILE_PATH} — logging starts fresh from here.")
+        log.info("Reset %s — logging starts fresh from here.", CSV_FILE_PATH)
 
     return (
         jsonify(
